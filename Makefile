@@ -175,12 +175,12 @@ RVFI_STEP_SRCS = $(SAIL_RISCV_MODEL_DIR)/riscv_step_common.sail \
 
 # Control inclusion of 64-bit only riscv_analysis
 SAIL_RV32_OTHER_SRCS     = $(SAIL_STEP_SRCS)
-SAIL_RV32_OTHER_COQ_SRCS = $(SAIL_RISCV_MODEL_DIR)/riscv_termination_common.sail \
-                           $(SAIL_RISCV_MODEL_DIR)/riscv_termination_rv32.sail
+# The nested sail-riscv has one termination file for both widths
+# (riscv_termination_common/_rv32/_rv64 were merged upstream).
+SAIL_RV32_OTHER_COQ_SRCS = $(SAIL_RISCV_MODEL_DIR)/riscv_termination.sail
 
 SAIL_RV64_OTHER_SRCS     = $(SAIL_STEP_SRCS)
-SAIL_RV64_OTHER_COQ_SRCS = $(SAIL_RISCV_MODEL_DIR)/riscv_termination_common.sail \
-                           $(SAIL_RISCV_MODEL_DIR)/riscv_termination_rv64.sail
+SAIL_RV64_OTHER_COQ_SRCS = $(SAIL_RISCV_MODEL_DIR)/riscv_termination.sail
 
 SAIL_OTHER_SRCS     = $(SAIL_$(ARCH)_OTHER_SRCS)
 SAIL_OTHER_COQ_SRCS = $(SAIL_$(ARCH)_OTHER_COQ_SRCS)
@@ -395,13 +395,36 @@ riscv_hol: generated_definitions/hol4/$(ARCH)/riscvScript.sml
 riscv_hol_build: generated_definitions/hol4/$(ARCH)/riscvTheory.uo
 .PHONY: riscv_hol riscv_hol_build
 
-COQ_LIBS = -R $(BBV_DIR)/theories bbv -R $(SAIL_LIB_DIR)/coq Sail -R generated_definitions/coq/$(ARCH) '' -R $(SAIL_RISCV_DIR)/handwritten_support '' -R handwritten_support ''
+# Rocq backend.  Sail >= 0.19 generates against the stdpp-based library
+# (SailStdpp), which is the installed opam package rocq-sail-stdpp (or
+# coq-sail-stdpp), so neither bbv nor $(SAIL_LIB_DIR)/coq is on the load path.
+# COQC defaults to `rocq compile` when the Rocq 9 front end is present.
+COQC ?= $(if $(shell command -v rocq 2>/dev/null),rocq compile,coqc)
+# handwritten_support/riscv_extras.v replaces the nested sail-riscv's copy,
+# which still targets the pre-0.20 library.
+COQ_LIBS = -R generated_definitions/coq/$(ARCH) '' -R handwritten_support ''
 
 riscv_coq: $(addprefix generated_definitions/coq/$(ARCH)/,riscv.v riscv_types.v)
 riscv_coq_build: generated_definitions/coq/$(ARCH)/riscv.vo
 .PHONY: riscv_coq riscv_coq_build
 
-$(addprefix generated_definitions/coq/$(ARCH)/,riscv.v riscv_types.v): $(SAIL_COQ_SRCS) Makefile handwritten_support/dummy_assembly_mappings.sail
+# SystemVerilog backend (sail_sv_backend).  riscv_sv generates the model;
+# riscv_sv_build additionally lints it with Verilator when one is installed.
+SV_FLAGS ?=
+VERILATOR ?= verilator
+riscv_sv: generated_definitions/sv/$(ARCH)/riscv.sv
+riscv_sv_build: riscv_sv
+	$(VERILATOR) --lint-only -Wno-fatal -Igenerated_definitions/sv/$(ARCH) generated_definitions/sv/$(ARCH)/riscv.sv
+.PHONY: riscv_sv riscv_sv_build
+
+generated_definitions/sv/$(ARCH)/riscv.sv: $(SAIL_SRCS) $(SAIL_RISCV_MODEL_DIR)/main.sail Makefile
+	mkdir -p generated_definitions/sv/$(ARCH)
+	$(SAIL) $(SAIL_FLAGS) $(SV_FLAGS) --sv --sv-output-dir generated_definitions/sv/$(ARCH) -o riscv $(SAIL_SRCS) $(SAIL_RISCV_MODEL_DIR)/main.sail
+
+# One Sail run writes both files; riscv_types.v hangs off riscv.v so that
+# make -j does not start two concurrent runs writing the same outputs.
+generated_definitions/coq/$(ARCH)/riscv_types.v: generated_definitions/coq/$(ARCH)/riscv.v ;
+generated_definitions/coq/$(ARCH)/riscv.v: $(SAIL_COQ_SRCS) Makefile handwritten_support/dummy_assembly_mappings.sail
 	mkdir -p generated_definitions/coq/$(ARCH)
 	$(SAIL) $(SAIL_FLAGS) -dcoq_undef_axioms -coq -coq_output_dir generated_definitions/coq/$(ARCH) -o riscv -coq_lib cheri_extras -coq_lib riscv_extras $(SAIL_COQ_SRCS) -splice handwritten_support/dummy_assembly_mappings.sail
 $(addprefix generated_definitions/coq/$(ARCH)/,riscv_duopod.v riscv_duopod_types.v): $(PRELUDE_SRCS) $(SAIL_RISCV_MODEL_DIR)/riscv_duopod.sail
@@ -409,15 +432,10 @@ $(addprefix generated_definitions/coq/$(ARCH)/,riscv_duopod.v riscv_duopod_types
 	$(SAIL) $(SAIL_FLAGS) -dcoq_undef_axioms -coq -coq_output_dir generated_definitions/coq/$(ARCH) -o riscv_duopod -coq_lib riscv_extras $^
 
 %.vo: %.v
-ifeq ($(wildcard $(BBV_DIR)/theories),)
-	$(error BBV directory not found. Please set the BBV_DIR environment variable)
-endif
-ifeq ($(wildcard $(SAIL_LIB_DIR)/coq),)
-	$(error lib directory of Sail not found. Please set the SAIL_LIB_DIR environment variable)
-endif
-	coqc $(COQ_LIBS) $<
+	$(COQC) $(COQ_LIBS) $<
 
-generated_definitions/coq/$(ARCH)/riscv.vo: generated_definitions/coq/$(ARCH)/riscv_types.vo $(SAIL_RISCV_DIR)/handwritten_support/riscv_extras.vo handwritten_support/cheri_extras.vo
+generated_definitions/coq/$(ARCH)/riscv.vo: generated_definitions/coq/$(ARCH)/riscv_types.vo handwritten_support/riscv_extras.vo handwritten_support/cheri_extras.vo
+handwritten_support/cheri_extras.vo: generated_definitions/coq/$(ARCH)/riscv_types.vo
 generated_definitions/coq/$(ARCH)/riscv_duopod.vo: generated_definitions/coq/$(ARCH)/riscv_duopod_types.vo $(SAIL_RISCV_DIR)/handwritten_support/riscv_extras.vo handwritten_support/cheri_extras.vo
 
 riscv_rmem: generated_definitions/lem-for-rmem/riscv.lem

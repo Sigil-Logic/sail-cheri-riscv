@@ -60,27 +60,30 @@
 (*  SUCH DAMAGE.                                                                         *)
 (*=======================================================================================*)
 
-Require Import Sail2_instr_kinds.
-Require Import Sail2_values.
-Require Import Sail2_operators_mwords.
-Require Import Sail2_prompt_monad.
-Require Import Sail2_prompt.
+(* Sail >= 0.19 generates Rocq against the stdpp-based library, SailStdpp,
+   in its concurrency-interface monad (M, defined in the generated
+   riscv_types.v).  read_ram and write_ram are now Sail functions
+   (sail-riscv/model/prelude_mem.sail) and the tag is carried by
+   __ReadRAM_Meta and __WriteRAM_Meta (src/cheri_mem_metadata.sail), so the
+   only CHERI externs left to supply are the two tag primitives that
+   src/cheri_prelude.sail declares:
+     val MEMr_tag = pure   "read_tag_bool"  : bits(64) -> bool
+     val MEMw_tag = impure "write_tag_bool" : (bits(64), bool) -> unit
 
-Definition write_ram {rv e} wk (addr : mword 64) size (v : mword (8 * size)) (tag : bool) : monad rv bool e := write_memt wk addr size v (bitU_of_bool tag).
+   Both are UNINTERPRETED here.  The concurrency interface has no tag-only
+   write (SailStdpp.ConcurrencyInterfaceBuiltins: "TODO: ought to support
+   tag-only writes"), and MEMr_tag is declared pure, so it is called outside
+   the monad and cannot observe any write.  Nothing in this Rocq model
+   relates a tag read to an earlier tag write: a theorem that depends on tag
+   memory must state that dependence as a hypothesis. *)
 
-Definition read_ram {rv e} rk (addr : mword 64) size (read_tag : bool) `{ArithFact (size >= 0)} : monad rv (mword (8 * size) * bool) e :=
-  if read_tag then
-    read_memt rk addr size >>= fun '(data, tag) =>
-    bool_of_bitU_nondet tag >>= fun tag =>
-    returnm (data, tag)
-  else
-    read_mem rk 64 addr size >>= fun data =>
-    returnm (data, false).
+Require Import SailStdpp.Base.
+Require Import riscv_types.
+Open Scope Z.
 
-Definition write_tag_bool {rv A E} (addr : mword A) tag : monad rv unit E :=
- read_memt Read_plain addr 16 >>= fun '(cap, _) =>
- write_memt Write_plain addr 16 cap (bitU_of_bool tag) >>= (fun _ => returnm tt).
+Parameter write_tag_bool : mword 64 -> bool -> M unit.
+Parameter read_tag_bool : mword 64 -> bool.
 
-Definition read_tag_bool {rv E} (addr : mword 64) : monad rv bool E :=
-  read_memt (B := 128) Read_plain addr 16 >>= fun '(cap, tag) =>
-  bool_of_bitU_nondet tag.
+(* Platform externs whose types mention model types. *)
+Axiom plat_nmi_handler : unit -> xlenbits.
+Axiom plat_get_16_random_bits : unit -> M (mword 16).
